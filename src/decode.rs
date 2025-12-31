@@ -203,7 +203,6 @@ pub fn decode(
 	let mut size = 0;
 	while instruction.opcode.is_none() {
 		let byte = memory.read_u8(rip + size)?;
-		dbg!(byte);
 		size += 1;
 		match byte {
 			0xF0

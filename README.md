@@ -8,7 +8,7 @@ The CPU has three modes: Hypervisor (-1), Supervisor (0), User (3). The Hypervis
 
 # Boot
 
-On boot the cr3 register will have the linear address 0, and four level paging will be used. Therefore a user should connect the first page to a hardware mapping such that this contains a valid page table. rip will be set to 0xFFFF_8000_0000_0000. The paging tables should therefore map this to a physical address which contains boot code.
+On boot the cr3 register will have the linear address 0, and four level paging will be used. Therefore a user should connect the first page to a hardware mapping such that this contains a valid page table. rip will be set to 0. The paging tables should therefore map this to a physical address which contains boot code.
 
 # Interrupts
 

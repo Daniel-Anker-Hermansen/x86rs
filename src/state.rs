@@ -60,7 +60,7 @@ impl ProcessorState {
 			cpl: 0,
 			interupt_stack_pointer: 0,
 			idt: 0,
-			instruction_pointer: 0xFFFF_8000_0000_0000,
+			instruction_pointer: 0,
 			rflags: 0,
 		}
 	}
@@ -80,7 +80,7 @@ impl ProcessorState {
 			}
 		};
 		let interrupt_entry_ptr = self.idt + 16 * vector;
-		if let Err(_) = try {
+		if try {
 			let data: [u8; 16] =
 				std::array::try_from_fn(|i| self.memory.read_u8(interrupt_entry_ptr + i as u64))?;
 			let entry: InteruptDescriptorEntry = unsafe { std::mem::transmute(data) };
@@ -106,7 +106,9 @@ impl ProcessorState {
 			self.instruction_pointer = entry.service_routine;
 			self.registers.primary_registers[4] = new_stack_pointer - 32;
 			self.cpl = 0;
-		} {
+		}
+		.is_err()
+		{
 			if matches!(interrupt, Interrupt::DoubleFault) {
 				fatal("Tripple fault");
 			} else {

@@ -1,8 +1,12 @@
-use std::{collections::BTreeMap, iter::repeat, ops::Bound};
+use std::{
+	collections::{BTreeMap, HashMap},
+	iter::repeat_n,
+	ops::Bound,
+};
 
 use crate::{
 	error,
-	interupt::{is_cannonical, Interrupt},
+	interupt::{Interrupt, is_cannonical},
 };
 
 pub trait Memory {
@@ -16,30 +20,29 @@ pub trait Memory {
 }
 
 pub struct ConventionalMemory {
-	data: Box<[u8]>,
+	pages: HashMap<u64, [u8; 1 << 12]>,
 }
 
 impl ConventionalMemory {
-	pub fn create(size: u64) -> Self {
-		match isize::try_from(size) {
-			Ok(size) => Self {
-				// Cast is safe as it is guaranteed to be positive.
-				data: repeat(0).take(size as usize).collect(),
-			},
-			Err(_) => error::fatal(&format!(
-				"Conventional Memory size of {size} bytes is greater than the host machine is able to simulate"
-			)),
+	pub fn create(_size: u64) -> Self {
+		ConventionalMemory {
+			pages: HashMap::new(),
 		}
+	}
+
+	fn get_page(&mut self, address: u64) -> &mut [u8; 1 << 12] {
+		let page = address & 0xFFFF_FFFF_FFFF_F000;
+		self.pages.entry(page).or_insert([0; 1 << 12])
 	}
 }
 
 impl Memory for ConventionalMemory {
 	fn read_u8(&mut self, address: u64) -> u8 {
-		self.data[address as usize] // In bounds due to MMU check.
+		self.get_page(address)[(address & 0xFFF) as usize]
 	}
 
 	fn write_u8(&mut self, address: u64, value: u8) {
-		self.data[address as usize] = value; // In bounds due to MMU check.
+		self.get_page(address)[(address & 0xFFF) as usize] = value;
 	}
 }
 
@@ -52,10 +55,10 @@ impl ReadOnlyMemory {
 		match isize::try_from(size) {
 			Ok(size) => {
 				if prefix.len() > size as usize {
-					error::fatal(&format!("ROM chip is larger than alloted size"));
+					error::fatal("ROM chip is larger than alloted size");
 				}
 				// Cast is safe as it is guaranteed to be positive.
-				let mut data: Box<[u8]> = repeat(0).take(size as usize).collect();
+				let mut data: Box<[u8]> = repeat_n(0, size as usize).collect();
 				data[..prefix.len()].copy_from_slice(prefix);
 				Self { data }
 			}
@@ -188,7 +191,7 @@ impl MemoryManagementUnit {
 		let level_3_ptr = self.extract_address(level_2_ptr, level_2, virtual_address)?;
 		let level_4_ptr = self.extract_address(level_3_ptr, level_3, virtual_address)?;
 		self.extract_address(level_4_ptr, level_4, virtual_address)
-			.map(|page| dbg!(page) + offset)
+			.map(|page| page + offset)
 	}
 
 	pub fn read_u8(&mut self, virtual_address: u64) -> Result<u8, Interrupt> {
