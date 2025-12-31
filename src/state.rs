@@ -2,7 +2,7 @@ use crate::{
 	decode::decode,
 	device::PortDevices,
 	error::{fatal, info},
-	instruction::{Instruction, RegisterSize},
+	instruction::{Instruction, RegisterSize, Rm},
 	interupt::{Interrupt, InteruptDescriptorEntry},
 	memory::MemoryManagementUnit,
 };
@@ -67,7 +67,7 @@ impl ProcessorState {
 
 	fn interrupt(&mut self, interrupt: Interrupt) {
 		info(&format!(
-			"Rip: {:X}, Interrupt: {interrupt}",
+			"Rip: 0x{:X}, Interrupt: {interrupt}",
 			self.instruction_pointer
 		));
 		let (vector, error) = match interrupt {
@@ -115,6 +115,76 @@ impl ProcessorState {
 				self.interrupt(Interrupt::DoubleFault);
 			}
 		}
+	}
+
+	fn write_rm(
+		&mut self,
+		rm: Rm,
+		displacement: u64,
+		value: u64,
+		bytes: usize,
+	) -> Result<(), Interrupt> {
+		let value_bytes = value.to_le_bytes();
+		let address = match rm {
+			Rm::Reg(r) => {
+				let mut mask = 0;
+				for i in 0..bytes {
+					mask |= 0xFF << (i * 8);
+				}
+				self.registers.primary_registers[r as usize] ^=
+					(self.registers.primary_registers[r as usize] & mask) ^ (value & mask);
+				return Ok(());
+			}
+			Rm::Mem(r) => self.registers.primary_registers[r as usize] + displacement,
+			Rm::Sib { scale, index, base } => {
+				let base = match base {
+					0xFE => self.instruction_pointer,
+					0xFF => 0,
+					_ => self.registers.primary_registers[base as usize],
+				};
+				let index = match index {
+					0x04 => 0,
+					_ => self.registers.primary_registers[index as usize],
+				};
+				(index << scale) + base + displacement
+			}
+			Rm::RipRel => self.instruction_pointer + displacement,
+		};
+		for (value, address) in value_bytes.into_iter().zip(address..).take(bytes) {
+			self.memory.write_u8(address, value)?;
+		}
+		Ok(())
+	}
+
+	fn read_rm(&mut self, rm: Rm, displacement: u64, bytes: usize) -> Result<u64, Interrupt> {
+		let address = match rm {
+			Rm::Reg(r) => {
+				let mut mask = 0;
+				for i in 0..bytes {
+					mask |= 0xFF << (i * 8);
+				}
+				return Ok(self.registers.primary_registers[r as usize] & mask);
+			}
+			Rm::Mem(r) => self.registers.primary_registers[r as usize] + displacement,
+			Rm::Sib { scale, index, base } => {
+				let base = match base {
+					0xFE => self.instruction_pointer,
+					0xFF => 0,
+					_ => self.registers.primary_registers[base as usize],
+				};
+				let index = match index {
+					0x04 => 0,
+					_ => self.registers.primary_registers[index as usize],
+				};
+				(index << scale) + base + displacement
+			}
+			Rm::RipRel => self.instruction_pointer + displacement,
+		};
+		let mut ret = [0; 8];
+		for (ret, address) in ret.iter_mut().zip(address..).take(bytes) {
+			*ret = self.memory.read_u8(address)?;
+		}
+		Ok(u64::from_le_bytes(ret))
 	}
 
 	/// Steps one instruction execution
@@ -168,8 +238,24 @@ impl ProcessorState {
 				Instruction::MovReg32Imm { register, imm } => {
 					self.registers.primary_registers[register as usize] = imm as u64;
 				}
+				Instruction::MovReg32RM32 {
+					dest,
+					src,
+					displacment,
+				} => {
+					let value = self.read_rm(src, displacment, 4)?;
+					self.registers.primary_registers[dest as usize] = value;
+				}
 				Instruction::MovReg64Imm { register, imm } => {
 					self.registers.primary_registers[register as usize] = imm;
+				}
+				Instruction::MovRM32Reg32 {
+					dest,
+					src,
+					displacment,
+				} => {
+					let value = self.registers.primary_registers[src as usize] & 0xFFFF_FFFF;
+					self.write_rm(dest, displacment, value, 4)?;
 				}
 				Instruction::Out8 { imm } => {
 					if self.cpl > 0 {

@@ -1,5 +1,5 @@
 use crate::{
-	instruction::{Instruction, Register, RegisterSize},
+	instruction::{DisplacementSize, Instruction, Register, RegisterSize, Rm},
 	interupt::Interrupt,
 	memory::MemoryManagementUnit,
 };
@@ -58,6 +58,40 @@ impl ModRM {
 			rm: byte & 0x07,
 		}
 	}
+
+	fn displacement_size(&self, sib: Option<Sib>) -> DisplacementSize {
+		match self.r#mod {
+			0x00 if self.rm == 0x04 && sib.expect("mod requires sib").base == 0x05 => {
+				DisplacementSize::_32
+			}
+			0x00 if self.rm == 0x05 => DisplacementSize::_32,
+			0x01 => DisplacementSize::_8,
+			0x02 => DisplacementSize::_32,
+			_ => DisplacementSize::_0,
+		}
+	}
+
+	fn calc_rm(&self, sib: Option<Sib>) -> Rm {
+		match self.r#mod {
+			0x03 => Rm::Reg(self.rm),
+			0x00 if self.rm == 0x05 => Rm::RipRel,
+			_ if self.rm == 0x04 => {
+				let sib = sib.expect("mod reuqires sib");
+				Rm::Sib {
+					scale: sib.scale,
+					index: sib.index,
+					base: if self.r#mod == 0x00 && self.rm == 0x05 {
+						0xFE
+					} else if self.r#mod == 0x00 && self.rm == 0x04 && sib.base == 0x05 {
+						0xFF
+					} else {
+						sib.base
+					},
+				}
+			}
+			_ => Rm::Mem(self.rm),
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -65,6 +99,15 @@ struct Sib {
 	scale: u8,
 	index: u8,
 	base: u8,
+}
+impl Sib {
+	fn decode(byte: u8) -> Sib {
+		Sib {
+			scale: (byte >> 6) & 0x03,
+			index: (byte >> 3) & 0x07,
+			base: byte & 0x07,
+		}
+	}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -82,10 +125,10 @@ struct InstructionParts {
 }
 
 impl InstructionParts {
-	fn nedds_modrm(&self) -> bool {
+	fn needs_modrm(&self) -> bool {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
-				0xFF => true,
+				0x89 | 0x8B | 0xFF => true,
 				_ => false,
 			},
 			Opcode::Two(_) => false,
@@ -94,9 +137,22 @@ impl InstructionParts {
 		}
 	}
 
+	fn needs_sib(&self) -> bool {
+		if let Some(modrm) = self.modrm {
+			modrm.r#mod != 0x03 && modrm.rm == 0x04
+		} else {
+			false
+		}
+	}
+
 	fn displacement_size(&self) -> usize {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
+				0x89 | 0x8B => self
+					.modrm
+					.expect("opcode requires mdorm")
+					.displacement_size(self.sib)
+					.into_bytes(),
 				0xEB => 1,
 				_ => 0,
 			},
@@ -141,6 +197,23 @@ impl InstructionParts {
 	fn into_instruction(self) -> Result<Instruction, Interrupt> {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
+				0x89 => {
+					let modrm = self.modrm.expect("oprcode requires modrm");
+					Ok(Instruction::MovRM32Reg32 {
+						dest: modrm.calc_rm(self.sib),
+						src: modrm.reg,
+						displacment: self.displacement,
+					})
+				}
+				0x8B => {
+					let modrm = self.modrm.expect("oprcode requires modrm");
+					Ok(Instruction::MovReg32RM32{
+						dest: modrm.reg,
+						src: modrm.calc_rm(self.sib),
+						displacment: self.displacement,
+					})
+
+				}
 				0xB8..0xC0 if self.wide() => Ok(Instruction::MovReg64Imm {
 					register: (byte & 0x07) | self.rex_b(),
 					imm: self.immediate,
@@ -262,8 +335,12 @@ pub fn decode(
 			_ => instruction.opcode = Some(Opcode::One(byte)),
 		}
 	}
-	if instruction.nedds_modrm() {
+	if instruction.needs_modrm() {
 		instruction.modrm = Some(ModRM::decode(memory.read_u8(rip + size)?));
+		size += 1;
+	}
+	if instruction.needs_sib() {
+		instruction.sib = Some(Sib::decode(memory.read_u8(rip + size)?));
 		size += 1;
 	}
 	for i in 0..instruction.displacement_size() {
@@ -313,22 +390,19 @@ mod test {
 			format!("[bits 64]\n{instruction}"),
 		)
 		.unwrap();
-		dbg!(
-			Command::new("nasm")
-				.args([
-					&format!("{file_name}.s"),
-					"-f",
-					"bin",
-					"-O0",
-					"-o",
-					&file_name,
-				])
-				.spawn()
-				.unwrap()
-				.wait()
-				.unwrap()
-				.code()
-		);
+		Command::new("nasm")
+			.args([
+				&format!("{file_name}.s"),
+				"-f",
+				"bin",
+				"-O0",
+				"-o",
+				&file_name,
+			])
+			.spawn()
+			.unwrap()
+			.wait()
+			.unwrap();
 		let data = std::fs::read(file_name).unwrap();
 		eprintln!("{:x?}", data);
 		test_instruction(&data, expected);
