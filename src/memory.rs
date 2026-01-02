@@ -217,4 +217,8 @@ impl MemoryManagementUnit {
 			.enumerate()
 			.try_for_each(|(i, value)| self.write_u8(virtual_address + i as u64, value))
 	}
+
+	pub fn swi4(&mut self, address: u64) {
+		self.paging_table_address = address;
+	}
 }

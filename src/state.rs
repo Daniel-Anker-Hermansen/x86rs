@@ -264,6 +264,16 @@ impl ProcessorState {
 					self.devices
 						.out_u8(imm as u16, self.registers.primary_registers[0] as u8);
 				}
+				Instruction::Swi4 { src, displacement } => {
+					let address = self.read_rm(src, displacement, 8)?;
+					self.memory.swi4(address);
+				}
+				Instruction::Wrcr { reg, config_reg } => {
+					eprintln!(
+						"Written 0x{:X}({}) to config register 0x{:X}",
+						self.registers.primary_registers[reg as usize], reg, config_reg
+					);
+				}
 			}
 			self.instruction_pointer = self.instruction_pointer.wrapping_add(size);
 		} {

@@ -127,10 +127,7 @@ struct InstructionParts {
 impl InstructionParts {
 	fn needs_modrm(&self) -> bool {
 		match self.opcode.expect("only called after opcode") {
-			Opcode::One(byte) => match byte {
-				0x89 | 0x8B | 0xFF => true,
-				_ => false,
-			},
+			Opcode::One(byte) => matches!(byte, 0x3F | 0x89 | 0x8B | 0xFF),
 			Opcode::Two(_) => false,
 			Opcode::Three38(_) => false,
 			Opcode::Three3A(_) => false,
@@ -148,7 +145,7 @@ impl InstructionParts {
 	fn displacement_size(&self) -> usize {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
-				0x89 | 0x8B => self
+				0x3F | 0x89 | 0x8B => self
 					.modrm
 					.expect("opcode requires mdorm")
 					.displacement_size(self.sib)
@@ -177,6 +174,14 @@ impl InstructionParts {
 	fn immediate_size(&self) -> usize {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
+				0x3F => {
+					let modrm = self.modrm.expect("opcode requires modrm");
+					match modrm.reg {
+						0 => 1,
+						1 => 0,
+						_ => 0, // UD,
+					}
+				}
 				0xB8..0xC0 => {
 					if self.wide() {
 						8
@@ -197,6 +202,23 @@ impl InstructionParts {
 	fn into_instruction(self) -> Result<Instruction, Interrupt> {
 		match self.opcode.expect("only called after opcode") {
 			Opcode::One(byte) => match byte {
+				0x3F => {
+					let modrm = self.modrm.expect("opcode requires modrm");
+					match modrm.reg {
+						0x00 => match modrm.r#mod {
+							0x3 => Ok(Instruction::Wrcr {
+								reg: modrm.rm | self.rex_b(),
+								config_reg: self.immediate as u8,
+							}),
+							_ => Err(Interrupt::Undefined),
+						},
+						0x01 => Ok(Instruction::Swi4 {
+							src: modrm.calc_rm(self.sib),
+							displacement: self.displacement,
+						}),
+						_ => Err(Interrupt::Undefined),
+					}
+				}
 				0x89 => {
 					let modrm = self.modrm.expect("oprcode requires modrm");
 					Ok(Instruction::MovRM32Reg32 {
@@ -207,12 +229,11 @@ impl InstructionParts {
 				}
 				0x8B => {
 					let modrm = self.modrm.expect("oprcode requires modrm");
-					Ok(Instruction::MovReg32RM32{
+					Ok(Instruction::MovReg32RM32 {
 						dest: modrm.reg,
 						src: modrm.calc_rm(self.sib),
 						displacment: self.displacement,
 					})
-
 				}
 				0xB8..0xC0 if self.wide() => Ok(Instruction::MovReg64Imm {
 					register: (byte & 0x07) | self.rex_b(),

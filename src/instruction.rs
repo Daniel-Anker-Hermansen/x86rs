@@ -71,4 +71,12 @@ pub enum Instruction {
 	Out8 {
 		imm: i8,
 	},
+	Swi4 {
+		src: Rm,
+		displacement: u64,
+	},
+	Wrcr {
+		reg: u8,
+		config_reg: u8,
+	},
 }
