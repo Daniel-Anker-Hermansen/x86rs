@@ -20,6 +20,7 @@ mod instruction;
 mod interupt;
 mod memory;
 mod state;
+mod temp;
 
 fn main() {
 	let args = Args::parse();
