@@ -15,13 +15,12 @@ enum OperandEncoding {
 impl OperandEncoding {
 	fn generate(&self) -> impl ToTokens {
 		match self {
-			OperandEncoding::SuffixReg => quote::quote! {Reg(byte & 0x07)},
-			OperandEncoding::ModReg => quote::quote! {Reg(0)},
-			OperandEncoding::ModRM => quote::quote! {Rm::Reg(0)},
-			OperandEncoding::Immediate(_) => quote::quote! {Immediate(immediate)},
+			OperandEncoding::SuffixReg => quote::quote! {Reg::parse_suffix(byte, rex)},
+			OperandEncoding::ModReg => quote::quote! {Reg(reg)},
+			OperandEncoding::ModRM => quote::quote! {rm},
+			OperandEncoding::Immediate(_) => quote::quote! {Immediate::parse(immediate)},
 			_ => unreachable!(),
 		}
-
 	}
 
 	fn operand0(&self) -> Option<impl ToTokens> {
@@ -42,7 +41,6 @@ impl OperandEncoding {
 				Some(quote::quote! {operand1: #code,})
 			}
 		}
-
 	}
 }
 
@@ -57,7 +55,7 @@ struct InstructionEncoding {
 	opcode1: u8,
 	opcode2: u8,
 
-	/// Modrm mode is only allowed to be ref (0b11) (Example: inc).
+	/// Modrm mode is only allowed to be reg (0b11) (Example: inc).
 	modrm_only_reg: bool,
 
 	/// Modrm mode is not allowed to be reg (0b11) (Example: lea).
@@ -77,6 +75,16 @@ impl InstructionEncoding {
 	fn suffix_reg(&self) -> bool {
 		matches!(self.operand0, OperandEncoding::SuffixReg)
 			|| matches!(self.operand1, OperandEncoding::SuffixReg)
+	}
+
+	fn needs_modrm(&self) -> bool {
+		matches!(
+			self.operand0,
+			OperandEncoding::ModRM | OperandEncoding::ModReg
+		) || matches!(
+			self.operand1,
+			OperandEncoding::ModRM | OperandEncoding::ModReg
+		)
 	}
 }
 
@@ -106,7 +114,7 @@ fn parse_instruction(src: &str) -> InstructionEncoding {
 	let opcode1 = opcode
 		.get(2..4)
 		.map(|x| u8::from_str_radix(x, 16).unwrap())
-		.unwrap_or(0);
+		.unwrap_or(0xFF);
 	let opcode2 = opcode
 		.get(4..6)
 		.map(|x| u8::from_str_radix(x, 16).unwrap())
@@ -135,6 +143,21 @@ fn parse_instruction(src: &str) -> InstructionEncoding {
 	instruction
 }
 
+fn generate_isntruction_decode(instruction: &InstructionEncoding) -> impl ToTokens {
+	let name = syn::Ident::new(&instruction.name, proc_macro::Span::call_site().into());
+	let immediate = 8u8;
+	let operand0 = instruction.operand0.operand0();
+	let operand1 = instruction.operand1.operand1();
+	let modrm = instruction.needs_modrm().then(|| quote::quote! {
+		let (reg, rm) = read_modrm(mmu, &mut size, instruction_pointer, address_override, segment_override, rex)?;
+	});
+	quote::quote! {
+		let immediate = read_immediate(mmu, &mut size, instruction_pointer, #immediate)?;
+		#modrm
+		return Ok((Instruction:: #name {#operand0 #operand1}, size));
+	}
+}
+
 fn generate_opcode_arm(instructions: Vec<&InstructionEncoding>) -> impl ToTokens {
 	assert!(instructions[0].opcode0 != 0x0F);
 	let names = instructions.iter().map(|x| &x.name);
@@ -143,14 +166,10 @@ fn generate_opcode_arm(instructions: Vec<&InstructionEncoding>) -> impl ToTokens
 		.iter()
 		.find(|instruction| instruction.wide)
 		.map(|instruction| {
-			let name = syn::Ident::new(&instruction.name, proc_macro::Span::call_site().into());
-			let immediate = 8u8;
-			let operand0 = instruction.operand0.operand0();
-			let operand1 = instruction.operand1.operand1();
+			let instruction = generate_isntruction_decode(instruction);
 			quote::quote! {
-				if wide(rex) {
-					let immediate = read_immediate(mmu, &mut size, instruction_pointer, #immediate)?;
-					return Ok((Instruction:: #name {#operand0 #operand1}, size));
+				if rex_w(rex) {
+					#instruction
 				}
 			}
 		});

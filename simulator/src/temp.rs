@@ -7,6 +7,7 @@ enum LockRep {
 	Repne,
 }
 
+#[derive(Clone, Copy)]
 struct Rex {
 	w: bool,
 	r: bool,
@@ -25,6 +26,34 @@ impl Rex {
 	}
 }
 
+fn rex_w(rex: Option<Rex>) -> bool {
+	match rex {
+		Some(rex) => rex.w,
+		None => false,
+	}
+}
+
+fn rex_r(rex: Option<Rex>) -> bool {
+	match rex {
+		Some(rex) => rex.r,
+		None => false,
+	}
+}
+
+fn rex_x(rex: Option<Rex>) -> bool {
+	match rex {
+		Some(rex) => rex.x,
+		None => false,
+	}
+}
+
+fn rex_b(rex: Option<Rex>) -> bool {
+	match rex {
+		Some(rex) => rex.b,
+		None => false,
+	}
+}
+
 enum SegmentOverride {
 	None,
 	Fs,
@@ -34,7 +63,7 @@ enum SegmentOverride {
 enum RM {
 	Reg(u8),
 	RipRel {
-		displacement: u64,
+		displacement: u32,
 
 		/// If this flag is set the address should truncated to 32 bits.
 		address_override: bool,
@@ -43,7 +72,7 @@ enum RM {
 		index: u8,
 		scale: u8,
 		base: u8,
-		displacement: u64,
+		displacement: u32,
 
 		/// If this flag is set the address should truncated to 32 bits.
 		address_override: bool,
@@ -55,7 +84,179 @@ enum RM {
 
 struct Reg(u8);
 
+impl Reg {
+	fn parse_suffix(opcode: u8, rex: Option<Rex>) -> Reg {
+		Reg(((rex_b(rex) as u8) << 3) | (opcode & 0x07))
+	}
+}
+
 struct Immediate(u64);
+
+impl Immediate {
+	fn parse(immediate: u64) -> Immediate {
+		Immediate(immediate)
+	}
+}
+
+// TODO: Handle byte registers without rex predix.
+fn parse_sib(
+	byte: u8,
+	address_override: bool,
+	segment_override: SegmentOverride,
+	displacement: u32,
+	rex: Option<Rex>,
+) -> RM {
+	let scale = (byte >> 6) & 3;
+	let index = ((rex_x(rex) as u8) << 3) | ((byte >> 3) & 7);
+	let base = ((rex_b(rex) as u8) << 3) | (byte & 7);
+	RM::Mem {
+		index,
+		scale,
+		base,
+		displacement,
+		address_override,
+		segment_override,
+	}
+}
+
+fn parse_sib_no_base(
+	byte: u8,
+	address_override: bool,
+	segment_override: SegmentOverride,
+	displacement: u32,
+	rex: Option<Rex>,
+) -> RM {
+	let scale = (byte >> 6) & 3;
+	let index = ((rex_x(rex) as u8) << 3) | ((byte >> 3) & 7);
+	let base = 0xFF; // We set the base to 0xFF to indicate that is zero.
+	RM::Mem {
+		index,
+		scale,
+		base,
+		displacement,
+		address_override,
+		segment_override,
+	}
+}
+
+fn read_modrm(
+	mmu: &mut MemoryManagementUnit,
+	size: &mut u64,
+	instruction_pointer: u64,
+	address_override: bool,
+	segment_override: SegmentOverride,
+	rex: Option<Rex>,
+) -> Result<(u8, RM), Interrupt> {
+	let modrm_byte = mmu.read_u8(instruction_pointer + *size)?;
+	*size += 1;
+	let reg = (modrm_byte >> 3) & 0x7;
+	let rm_field = modrm_byte & 0x7;
+	let rm = match modrm_byte >> 6 {
+		0x00 => match rm_field {
+			4 => {
+				*size += 1;
+				let sib_byte = mmu.read_u8(instruction_pointer + *size - 1)?;
+				let mut displacement_bytes = [0; 4];
+				if sib_byte & 7 == 5 {
+					for i in 0..4 {
+						displacement_bytes[i] = mmu.read_u8(instruction_pointer + *size)?;
+						*size += 1;
+					}
+					parse_sib_no_base(
+						sib_byte,
+						address_override,
+						segment_override,
+						u32::from_le_bytes(displacement_bytes),
+						rex,
+					)
+				} else {
+					parse_sib(
+						sib_byte,
+						address_override,
+						segment_override,
+						u32::from_le_bytes(displacement_bytes),
+						rex,
+					)
+				}
+			}
+			5 => {
+				let mut displacement_bytes = [0; 4];
+				for i in 0..4 {
+					displacement_bytes[i] = mmu.read_u8(instruction_pointer + *size)?;
+					*size += 1;
+				}
+				RM::RipRel {
+					displacement: u32::from_le_bytes(displacement_bytes),
+					address_override,
+				}
+			}
+			_ => RM::Mem {
+				index: 4,
+				scale: 0,
+				base: ((rex_b(rex) as u8) << 3) | rm_field,
+				displacement: 0,
+				address_override,
+				segment_override,
+			},
+		},
+		0x01 => {
+			let sib_byte = mmu.read_u8(instruction_pointer + *size)?;
+			*size += 1;
+			let displacement = mmu.read_u8(instruction_pointer + *size)? as u32;
+			*size += 1;
+			if rm_field == 4 {
+				*size += 1;
+				parse_sib(
+					sib_byte,
+					address_override,
+					segment_override,
+					displacement,
+					rex,
+				)
+			} else {
+				RM::Mem {
+					index: 4,
+					scale: 0,
+					base: ((rex_b(rex) as u8) << 3) | rm_field,
+					displacement,
+					address_override,
+					segment_override,
+				}
+			}
+		}
+		0x02 => {
+			let sib_byte = mmu.read_u8(instruction_pointer + *size)?;
+			*size += 1;
+			let mut displacement_bytes = [0; 4];
+			for i in 0..4 {
+				displacement_bytes[i] = mmu.read_u8(instruction_pointer + *size)?;
+				*size += 1;
+			}
+			let displacement = u32::from_le_bytes(displacement_bytes);
+			if rm_field == 4 {
+				parse_sib(
+					sib_byte,
+					address_override,
+					segment_override,
+					displacement,
+					rex,
+				)
+			} else {
+				RM::Mem {
+					index: 4,
+					scale: 0,
+					base: ((rex_b(rex) as u8) << 3) | rm_field,
+					displacement,
+					address_override,
+					segment_override,
+				}
+			}
+		}
+		0x03 => RM::Reg(((rex_b(rex) as u8) << 3) | rm_field),
+		_ => unreachable!(),
+	};
+	Ok((((rex_r(rex) as u8) << 3) | reg, rm))
+}
 
 fn read_immediate(
 	mmu: &mut MemoryManagementUnit,
@@ -69,13 +270,6 @@ fn read_immediate(
 		*size += 1;
 	}
 	Ok(u64::from_le_bytes(bytes))
-}
-
-fn wide(rex: Option<Rex>) -> bool {
-	match rex {
-		Some(rex) => rex.w,
-		None => false,
-	}
 }
 
 // so: Size override prefix
