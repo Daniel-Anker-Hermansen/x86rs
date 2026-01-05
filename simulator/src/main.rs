@@ -1,5 +1,6 @@
 #![feature(array_try_from_fn)]
 #![feature(btree_cursors)]
+#![feature(macro_metavar_expr_concat)]
 #![feature(try_blocks)]
 
 use clap::Parser;
@@ -13,14 +14,12 @@ use state::ProcessorState;
 use crate::device::{PortDevices, UTF8Console};
 
 mod args;
-mod decode;
 mod device;
 mod error;
 mod instruction;
 mod interupt;
 mod memory;
 mod state;
-mod temp;
 
 fn main() {
 	let args = Args::parse();

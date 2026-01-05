@@ -78,13 +78,23 @@ impl InstructionEncoding {
 	}
 
 	fn needs_modrm(&self) -> bool {
-		matches!(
+		(matches!(
 			self.operand0,
 			OperandEncoding::ModRM | OperandEncoding::ModReg
 		) || matches!(
 			self.operand1,
 			OperandEncoding::ModRM | OperandEncoding::ModReg
-		)
+		)) && (self.opcode0 == 0x0F || self.opcode1 == 0xFF)
+	}
+
+	fn immediate_size(&self) -> u8 {
+		if let OperandEncoding::Immediate(size) = self.operand0 {
+			return size / 8;
+		}
+		if let OperandEncoding::Immediate(size) = self.operand1 {
+			return size / 8;
+		}
+		0
 	}
 }
 
@@ -143,30 +153,56 @@ fn parse_instruction(src: &str) -> InstructionEncoding {
 	instruction
 }
 
-fn generate_isntruction_decode(instruction: &InstructionEncoding) -> impl ToTokens {
+fn generate_instruction_decode(instruction: &InstructionEncoding) -> impl ToTokens {
 	let name = syn::Ident::new(&instruction.name, proc_macro::Span::call_site().into());
-	let immediate = 8u8;
+	let immediate = instruction.immediate_size();
 	let operand0 = instruction.operand0.operand0();
 	let operand1 = instruction.operand1.operand1();
 	let modrm = instruction.needs_modrm().then(|| quote::quote! {
 		let (reg, rm) = read_modrm(mmu, &mut size, instruction_pointer, address_override, segment_override, rex)?;
 	});
 	quote::quote! {
-		let immediate = read_immediate(mmu, &mut size, instruction_pointer, #immediate)?;
 		#modrm
+		let immediate = read_immediate(mmu, &mut size, instruction_pointer, #immediate)?;
 		return Ok((Instruction:: #name {#operand0 #operand1}, size));
 	}
 }
 
-fn generate_opcode_arm(instructions: Vec<&InstructionEncoding>) -> impl ToTokens {
+fn generate_opcode_arm(instructions: Vec<&InstructionEncoding>, reg_opcode: bool) -> impl ToTokens {
 	assert!(instructions[0].opcode0 != 0x0F);
+
+	if instructions[0].opcode1 != 0xFF && !reg_opcode {
+		// This means that reg field is used as an opcode extension
+		let mut groups = BTreeMap::<u8, Vec<&InstructionEncoding>>::new();
+
+		for instruction in &instructions {
+			groups
+				.entry(instruction.opcode1)
+				.or_default()
+				.push(instruction);
+		}
+
+		let arms = groups.into_iter().map(|(code, instructions)| {
+			let handler = generate_opcode_arm(instructions, true);
+			quote::quote! {#code => #handler, }
+		});
+
+		return quote::quote! {{
+			let (reg, rm) = read_modrm(mmu, &mut size, instruction_pointer, address_override, segment_override, rex)?;
+			match reg {
+				#(#arms)*
+				_ => Err(Interrupt::Undefined),
+			}
+		}};
+	}
+
 	let names = instructions.iter().map(|x| &x.name);
 
 	let wide_instruction = instructions
 		.iter()
 		.find(|instruction| instruction.wide)
 		.map(|instruction| {
-			let instruction = generate_isntruction_decode(instruction);
+			let instruction = generate_instruction_decode(instruction);
 			quote::quote! {
 				if rex_w(rex) {
 					#instruction
@@ -174,10 +210,32 @@ fn generate_opcode_arm(instructions: Vec<&InstructionEncoding>) -> impl ToTokens
 			}
 		});
 
+	let so_instruction = instructions
+		.iter()
+		.find(|instruction| instruction.size_override)
+		.map(|instruction| {
+			let instruction = generate_instruction_decode(instruction);
+			quote::quote! {
+				if size_override {
+					#instruction
+				}
+			}
+		});
+
+	let default = instructions
+		.iter()
+		.find(|instruction| !instruction.size_override && !instruction.wide)
+		.map(|instruction| {
+			let instruction = generate_instruction_decode(instruction);
+			quote::quote! { #instruction }
+		})
+		.unwrap_or_else(|| quote::quote! { Err(Interrupt::Undefined) });
+
 	quote::quote! {{
 		let x = [#(#names), *];
 		#wide_instruction
-		Err(Interrupt::Undefined)
+		#so_instruction
+		#default
 	}}
 }
 
@@ -214,11 +272,12 @@ pub fn generate_instructions(tokens: TokenStream) -> TokenStream {
 		})
 		.collect();
 
-	let instruction_definition = quote::quote! { enum Instruction {#(#enum_variants)*}};
+	let instruction_definition =
+		quote::quote! { #[derive(Debug)] pub enum Instruction {#(#enum_variants)*}};
 
 	let decode_function = quote::quote! {
 		pub fn decode(mmu: &mut MemoryManagementUnit, instruction_pointer: u64) -> Result<(Instruction, u64), Interrupt> {
-			decode_internal(mmu, instruction_pointer, false, false, None, None, None)
+			decode_internal(mmu, instruction_pointer, false, false, None, SegmentOverride::None, None)
 		}
 	};
 
@@ -238,12 +297,12 @@ pub fn generate_instructions(tokens: TokenStream) -> TokenStream {
 	}
 
 	let opcode1 = groups.into_iter().map(|(code, instructions)| {
-		let handler = generate_opcode_arm(instructions);
+		let handler = generate_opcode_arm(instructions, false);
 		quote::quote! {#code => #handler, }
 	});
 
 	let decode_internal_function = quote::quote! {
-		fn decode_internal(mmu: &mut MemoryManagementUnit, instruction_pointer: u64, size_override: bool, address_override: bool, lock_rep: Option<LockRep>, segment_override: Option<SegmentOverride>, rex: Option<Rex>) -> Result<(Instruction, u64), Interrupt> {
+		fn decode_internal(mmu: &mut MemoryManagementUnit, instruction_pointer: u64, size_override: bool, address_override: bool, lock_rep: Option<LockRep>, segment_override: SegmentOverride, rex: Option<Rex>) -> Result<(Instruction, u64), Interrupt> {
 			let byte = mmu.read_u8(instruction_pointer)?;
 			let mut size = 1;
 			match byte {
@@ -252,11 +311,11 @@ pub fn generate_instructions(tokens: TokenStream) -> TokenStream {
 					return Ok((instruction, size + 1));
 				}
 				0x64 => {
-					let (instruction, size) = decode_internal(mmu, instruction_pointer + 1, size_override, address_override, lock_rep, Some(SegmentOverride::Fs), None)?;
+					let (instruction, size) = decode_internal(mmu, instruction_pointer + 1, size_override, address_override, lock_rep, SegmentOverride::Fs, None)?;
 					return Ok((instruction, size + 1));
 				}
 				0x65 => {
-					let (instruction, size) = decode_internal(mmu, instruction_pointer + 1, size_override, address_override, lock_rep, Some(SegmentOverride::Gs), None)?;
+					let (instruction, size) = decode_internal(mmu, instruction_pointer + 1, size_override, address_override, lock_rep, SegmentOverride::Gs, None)?;
 					return Ok((instruction, size + 1));
 				}
 				0x66 => {

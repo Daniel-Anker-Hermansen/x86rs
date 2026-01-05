@@ -1,11 +1,12 @@
 use crate::{
-	decode::decode,
 	device::PortDevices,
 	error::{fatal, info},
-	instruction::{Instruction, RegisterSize, Rm},
+	instruction::{Instruction, RM, Reg, decode},
 	interupt::{Interrupt, InteruptDescriptorEntry},
 	memory::MemoryManagementUnit,
 };
+
+const RSP: Reg = Reg(4);
 
 pub struct Registers {
 	/// The primary register file which is always available.
@@ -49,6 +50,98 @@ pub struct ProcessorState {
 
 	/// Flags
 	rflags: u64,
+}
+
+macro_rules! read_write_rm {
+	($size:ident) => {
+		fn ${concat(write_rm_, $size)}(&mut self, rm: RM, value: $size) -> Result<(), Interrupt> {
+			match rm {
+				RM::Reg(reg) => Ok(self.${concat(write_reg_, $size)}(Reg(reg), value)),
+				RM::RipRel {
+					displacement,
+					address_override,
+				} => {
+					let rip = if address_override {
+						self.instruction_pointer & 0xFFFF
+					} else {
+						self.instruction_pointer
+					};
+					self.memory.${concat(write_, $size)}(rip + displacement as u64, value)
+				}
+				RM::Mem {
+					index,
+					scale,
+					base,
+					displacement,
+					address_override,
+					#[allow(unused)]
+					segment_override,
+				} => {
+					let base = if base == 0xFF {
+						0
+					} else {
+						self.read_reg_u64(Reg(base))
+					};
+					let index = if index == 4 {
+						0
+					} else {
+						self.read_reg_u64(Reg(index))
+					};
+					let address = base + (index << scale) + displacement as u64;
+					let address = if address_override {
+						address & 0xFFFF
+					} else {
+						address
+					};
+					self.memory.${concat(write_, $size)}(address, value)
+				}
+			}
+		}
+
+		fn ${concat(read_rm_, $size)}(&mut self, rm: RM) -> Result<$size, Interrupt> {
+			match rm {
+				RM::Reg(reg) => Ok(self.${concat(read_reg_, $size)}(Reg(reg))),
+				RM::RipRel {
+					displacement,
+					address_override,
+				} => {
+					let rip = if address_override {
+						self.instruction_pointer & 0xFFFF
+					} else {
+						self.instruction_pointer
+					};
+					self.memory.${concat(read_, $size)}(rip + displacement as u64)
+				}
+				RM::Mem {
+					index,
+					scale,
+					base,
+					displacement,
+					address_override,
+					#[allow(unused)]
+					segment_override,
+				} => {
+					let base = if base == 0xFF {
+						0
+					} else {
+						self.read_reg_u64(Reg(base))
+					};
+					let index = if index == 4 {
+						0
+					} else {
+						self.read_reg_u64(Reg(index))
+					};
+					let address = base + (index << scale) + displacement as u64;
+					let address = if address_override {
+						address & 0xFFFF
+					} else {
+						address
+					};
+					self.memory.${concat(read_, $size)}(address)
+				}
+			}
+		}
+	};
 }
 
 impl ProcessorState {
@@ -117,164 +210,207 @@ impl ProcessorState {
 		}
 	}
 
-	fn write_rm(
-		&mut self,
-		rm: Rm,
-		displacement: u64,
-		value: u64,
-		bytes: usize,
-	) -> Result<(), Interrupt> {
-		let value_bytes = value.to_le_bytes();
-		let address = match rm {
-			Rm::Reg(r) => {
-				let mut mask = 0;
-				for i in 0..bytes {
-					mask |= 0xFF << (i * 8);
-				}
-				self.registers.primary_registers[r as usize] ^=
-					(self.registers.primary_registers[r as usize] & mask) ^ (value & mask);
-				return Ok(());
-			}
-			Rm::Mem(r) => self.registers.primary_registers[r as usize] + displacement,
-			Rm::Sib { scale, index, base } => {
-				let base = match base {
-					0xFE => self.instruction_pointer,
-					0xFF => 0,
-					_ => self.registers.primary_registers[base as usize],
-				};
-				let index = match index {
-					0x04 => 0,
-					_ => self.registers.primary_registers[index as usize],
-				};
-				(index << scale) + base + displacement
-			}
-			Rm::RipRel => self.instruction_pointer + displacement,
-		};
-		for (value, address) in value_bytes.into_iter().zip(address..).take(bytes) {
-			self.memory.write_u8(address, value)?;
-		}
-		Ok(())
+	fn write_reg_u8(&mut self, Reg(reg): Reg, value: u8) {
+		let handle = &mut self.registers.primary_registers[reg as usize];
+		*handle ^= (*handle & 0xFF) ^ value as u64;
 	}
 
-	fn read_rm(&mut self, rm: Rm, displacement: u64, bytes: usize) -> Result<u64, Interrupt> {
-		let address = match rm {
-			Rm::Reg(r) => {
-				let mut mask = 0;
-				for i in 0..bytes {
-					mask |= 0xFF << (i * 8);
-				}
-				return Ok(self.registers.primary_registers[r as usize] & mask);
-			}
-			Rm::Mem(r) => self.registers.primary_registers[r as usize] + displacement,
-			Rm::Sib { scale, index, base } => {
-				let base = match base {
-					0xFE => self.instruction_pointer,
-					0xFF => 0,
-					_ => self.registers.primary_registers[base as usize],
-				};
-				let index = match index {
-					0x04 => 0,
-					_ => self.registers.primary_registers[index as usize],
-				};
-				(index << scale) + base + displacement
-			}
-			Rm::RipRel => self.instruction_pointer + displacement,
-		};
-		let mut ret = [0; 8];
-		for (ret, address) in ret.iter_mut().zip(address..).take(bytes) {
-			*ret = self.memory.read_u8(address)?;
-		}
-		Ok(u64::from_le_bytes(ret))
+	fn write_reg_u16(&mut self, Reg(reg): Reg, value: u16) {
+		let handle = &mut self.registers.primary_registers[reg as usize];
+		*handle ^= (*handle & 0xFF) ^ value as u64;
 	}
+
+	fn write_reg_u32(&mut self, Reg(reg): Reg, value: u32) {
+		self.registers.primary_registers[reg as usize] = value as u64;
+	}
+
+	fn write_reg_u64(&mut self, Reg(reg): Reg, value: u64) {
+		self.registers.primary_registers[reg as usize] = value;
+	}
+
+	fn read_reg_u8(&mut self, Reg(reg): Reg) -> u8 {
+		self.registers.primary_registers[reg as usize] as u8
+	}
+
+	fn read_reg_u16(&mut self, Reg(reg): Reg) -> u16 {
+		self.registers.primary_registers[reg as usize] as u16
+	}
+
+	fn read_reg_u32(&mut self, Reg(reg): Reg) -> u32 {
+		self.registers.primary_registers[reg as usize] as u32
+	}
+
+	fn read_reg_u64(&mut self, Reg(reg): Reg) -> u64 {
+		self.registers.primary_registers[reg as usize]
+	}
+
+	read_write_rm!(u8);
+	read_write_rm!(u16);
+	read_write_rm!(u32);
+	read_write_rm!(u64);
 
 	/// Steps one instruction execution
 	pub fn step_instruction(&mut self) {
 		if let Err(interrupt) = try {
 			let (instruction, size) = decode(&mut self.memory, self.instruction_pointer)?;
 			match instruction {
-				Instruction::In8 { imm } => {
+				Instruction::In8 { operand0 } => {
 					if self.cpl > 0 {
 						Err(Interrupt::GeneralProtection)?;
 					}
-					self.registers.primary_registers[0] = (self.registers.primary_registers[0]
-						& 0xFFFF_FFFF_FFFF_FF00)
-						| self.devices.in_u8(imm as u16) as u64;
+					let value = self.devices.in_u8(operand0.0 as u16);
+					self.write_reg_u8(Reg(0), value);
 				}
-				Instruction::IncReg { register } => match register.size {
-					RegisterSize::_8L => todo!(),
-					RegisterSize::_8H => todo!(),
-					RegisterSize::_16 => todo!(),
-					RegisterSize::_32 => {
-						let reg = &mut self.registers.primary_registers[register.selector as usize];
-						*reg = (*reg as u32).wrapping_add(1) as u64;
+				#[allow(unused)]
+				Instruction::In16 { operand0 } => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
 					}
-					RegisterSize::_64 => todo!(),
-				},
-				Instruction::Iret => {
-					let instruction_pointer = self
-						.memory
-						.read_u64(self.registers.primary_registers[4] + 8)?;
-					let rflags = self
-						.memory
-						.read_u64(self.registers.primary_registers[4] + 16)?;
-					let stack_pointer = self
-						.memory
-						.read_u64(self.registers.primary_registers[4] + 24)?;
+					fatal("16 bit devices are not implemented");
+				}
+				#[allow(unused)]
+				Instruction::In32 { operand0 } => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					fatal("32 bit devices are not implemented");
+				}
+				Instruction::In8D {} => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					let port = self.read_reg_u16(Reg(2));
+					let value = self.devices.in_u8(port);
+					self.write_reg_u8(Reg(0), value);
+				}
+				Instruction::In16D {} => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					fatal("16 bit devices are not implemented");
+				}
+				Instruction::In32D {} => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					fatal("32 bit devices are not implemented");
+				}
+				Instruction::IncRM8 { operand0 } => {
+					let value = self.read_rm_u8(operand0)?.wrapping_add(1);
+					self.write_rm_u8(operand0, value)?
+				}
+				Instruction::IncRM16 { operand0 } => {
+					let value = self.read_rm_u16(operand0)?.wrapping_add(1);
+					self.write_rm_u16(operand0, value)?
+				}
+				Instruction::IncRM32 { operand0 } => {
+					let value = self.read_rm_u32(operand0)?.wrapping_add(1);
+					self.write_rm_u32(operand0, value)?
+				}
+				Instruction::IncRM64 { operand0 } => {
+					let value = self.read_rm_u64(operand0)?.wrapping_add(1);
+					self.write_rm_u64(operand0, value)?
+				}
+				Instruction::Iret {} => {
+					let rsp = self.read_reg_u64(RSP);
+					let instruction_pointer = self.memory.read_u64(rsp + 8)?;
+					let rflags = self.memory.read_u64(rsp + 16)?;
+					let stack_pointer = self.memory.read_u64(rsp + 24)?;
 					self.instruction_pointer = instruction_pointer;
-					self.rflags = rflags & 0xFFFF_FFFF;
-					self.registers.primary_registers[4] = stack_pointer;
+					self.rflags = rflags;
+					self.write_reg_u64(RSP, stack_pointer);
 					self.cpl = ((rflags as i64) >> 32) as i8;
 					return; // Skip incrementing the instruction pointer as
 					// this changes the instruction pointer as part of
 					// the instruction.
 				}
-				Instruction::JmpRel8 { rel } => {
+				Instruction::JmpRel8 { operand0 } => {
 					self.instruction_pointer = self
 						.instruction_pointer
-						.wrapping_add(rel as i64 as u64) // Sign extend
-						.wrapping_add(size);
-					return;
+						.wrapping_add(operand0.0 as i8 as i64 as u64)
 				}
-				Instruction::MovReg32Imm { register, imm } => {
-					self.registers.primary_registers[register as usize] = imm as u64;
+				Instruction::JmpRel32 { operand0 } => {
+					self.instruction_pointer = self
+						.instruction_pointer
+						.wrapping_add(operand0.0 as i32 as i64 as u64)
 				}
-				Instruction::MovReg32RM32 {
-					dest,
-					src,
-					displacment,
-				} => {
-					let value = self.read_rm(src, displacment, 4)?;
-					self.registers.primary_registers[dest as usize] = value;
+				Instruction::MovReg8Imm { operand0, operand1 } => {
+					self.write_reg_u8(operand0, operand1.0 as u8)
 				}
-				Instruction::MovReg64Imm { register, imm } => {
-					self.registers.primary_registers[register as usize] = imm;
+				Instruction::MovReg16Imm { operand0, operand1 } => {
+					self.write_reg_u16(operand0, operand1.0 as u16)
 				}
-				Instruction::MovRM32Reg32 {
-					dest,
-					src,
-					displacment,
-				} => {
-					let value = self.registers.primary_registers[src as usize] & 0xFFFF_FFFF;
-					self.write_rm(dest, displacment, value, 4)?;
+				Instruction::MovReg32Imm { operand0, operand1 } => {
+					self.write_reg_u32(operand0, operand1.0 as u32)
 				}
-				Instruction::Out8 { imm } => {
+				Instruction::MovReg64Imm { operand0, operand1 } => {
+					self.write_reg_u64(operand0, operand1.0)
+				}
+				Instruction::MovReg8RM { operand0, operand1 } => {
+					let value = self.read_rm_u8(operand1)?;
+					self.write_reg_u8(operand0, value);
+				}
+				Instruction::MovReg16RM { operand0, operand1 } => {
+					let value = self.read_rm_u16(operand1)?;
+					self.write_reg_u16(operand0, value);
+				}
+				Instruction::MovReg32RM { operand0, operand1 } => {
+					let value = self.read_rm_u32(operand1)?;
+					self.write_reg_u32(operand0, value);
+				}
+				Instruction::MovReg64RM { operand0, operand1 } => {
+					let value = self.read_rm_u64(operand1)?;
+					self.write_reg_u64(operand0, value);
+				}
+				Instruction::MovRM8Reg { operand0, operand1 } => {
+					let value = self.read_reg_u8(operand1);
+					self.write_rm_u8(operand0, value)?;
+				}
+				Instruction::MovRM16Reg { operand0, operand1 } => {
+					let value = self.read_reg_u16(operand1);
+					self.write_rm_u16(operand0, value)?;
+				}
+				Instruction::MovRM32Reg { operand0, operand1 } => {
+					let value = self.read_reg_u32(operand1);
+					self.write_rm_u32(operand0, value)?;
+				}
+				Instruction::MovRM64Reg { operand0, operand1 } => {
+					let value = self.read_reg_u64(operand1);
+					self.write_rm_u64(operand0, value)?;
+				}
+				Instruction::Out8 { operand0 } => {
 					if self.cpl > 0 {
 						Err(Interrupt::GeneralProtection)?;
 					}
-					self.devices
-						.out_u8(imm as u16, self.registers.primary_registers[0] as u8);
+					let value = self.read_reg_u8(Reg(0));
+					self.devices.out_u8(operand0.0 as u16, value);
 				}
-				Instruction::Swi4 { src, displacement } => {
-					let address = self.read_rm(src, displacement, 8)?;
-					self.memory.swi4(address);
+				#[allow(unused)]
+				Instruction::Out16 { operand0 } => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					fatal("16 bit devices are not implemented");
 				}
-				Instruction::Wrcr { reg, config_reg } => {
+				#[allow(unused)]
+				Instruction::Out32 { operand0 } => {
+					if self.cpl > 0 {
+						Err(Interrupt::GeneralProtection)?;
+					}
+					fatal("32 bit devices are not implemented");
+				}
+				Instruction::Swi4 { operand0 } => {
+					let value = self.read_rm_u64(operand0)?;
+					self.memory.swi4(value)
+				}
+				Instruction::Wrcr { operand0, operand1 } => {
 					eprintln!(
-						"Written 0x{:X}({}) to config register 0x{:X}",
-						self.registers.primary_registers[reg as usize], reg, config_reg
+						"Written 0x{:X} to config register 0x{:X}",
+						self.read_rm_u64(operand1)?,
+						operand0.0
 					);
 				}
-			}
+			};
 			self.instruction_pointer = self.instruction_pointer.wrapping_add(size);
 		} {
 			self.interrupt(interrupt);

@@ -199,6 +199,16 @@ impl MemoryManagementUnit {
 		self.translate(virtual_address)
 			.map(|address| self.memory_management_unit.read_u8(address))
 	}
+	
+	pub fn read_u16(&mut self, virtual_address: u64) -> Result<u16, Interrupt> {
+		std::array::try_from_fn(|i| self.read_u8(virtual_address + i as u64))
+			.map(u16::from_le_bytes)
+	}
+	
+	pub fn read_u32(&mut self, virtual_address: u64) -> Result<u32, Interrupt> {
+		std::array::try_from_fn(|i| self.read_u8(virtual_address + i as u64))
+			.map(u32::from_le_bytes)
+	}
 
 	pub fn read_u64(&mut self, virtual_address: u64) -> Result<u64, Interrupt> {
 		std::array::try_from_fn(|i| self.read_u8(virtual_address + i as u64))
@@ -208,6 +218,22 @@ impl MemoryManagementUnit {
 	pub fn write_u8(&mut self, virtual_address: u64, value: u8) -> Result<(), Interrupt> {
 		self.translate(virtual_address)
 			.map(|address| self.memory_management_unit.write_u8(address, value))
+	}
+
+	pub fn write_u16(&mut self, virtual_address: u64, value: u16) -> Result<(), Interrupt> {
+		value
+			.to_le_bytes()
+			.into_iter()
+			.enumerate()
+			.try_for_each(|(i, value)| self.write_u8(virtual_address + i as u64, value))
+	}
+	
+	pub fn write_u32(&mut self, virtual_address: u64, value: u32) -> Result<(), Interrupt> {
+		value
+			.to_le_bytes()
+			.into_iter()
+			.enumerate()
+			.try_for_each(|(i, value)| self.write_u8(virtual_address + i as u64, value))
 	}
 
 	pub fn write_u64(&mut self, virtual_address: u64, value: u64) -> Result<(), Interrupt> {
