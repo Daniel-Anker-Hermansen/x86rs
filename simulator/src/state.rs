@@ -399,6 +399,30 @@ impl ProcessorState {
 					}
 					fatal("32 bit devices are not implemented");
 				}
+				Instruction::PopReg16 { operand0 } => {
+					let rsp = self.read_reg_u64(RSP);
+					let value = self.memory.read_u16(rsp)?;
+					self.write_reg_u64(RSP, rsp.wrapping_add(2));
+					self.write_reg_u16(operand0, value);
+				}
+				Instruction::PopReg64 { operand0 } => {
+					let rsp = self.read_reg_u64(RSP);
+					let value = self.memory.read_u64(rsp)?;
+					self.write_reg_u64(RSP, rsp.wrapping_add(2));
+					self.write_reg_u64(operand0, value);
+				}
+				Instruction::PushReg16 { operand0 } => {
+					let value = self.read_reg_u16(operand0);
+					let rsp = self.read_reg_u64(RSP);
+					self.write_reg_u64(RSP, rsp.wrapping_sub(2));
+					self.memory.write_u16(rsp.wrapping_sub(2), value)?;
+				}
+				Instruction::PushReg64 { operand0 } => {
+					let value = self.read_reg_u64(operand0);
+					let rsp = self.read_reg_u64(RSP);
+					self.write_reg_u64(RSP, rsp.wrapping_sub(8));
+					self.memory.write_u64(rsp.wrapping_sub(8), value)?;
+				}
 				Instruction::Swi4 { operand0 } => {
 					let value = self.read_rm_u64(operand0)?;
 					self.memory.swi4(value)

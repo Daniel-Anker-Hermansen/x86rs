@@ -54,14 +54,14 @@ fn rex_b(rex: Option<Rex>) -> bool {
 	}
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SegmentOverride {
 	None,
 	Fs,
 	Gs,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RM {
 	Reg(u8),
 	RipRel {
@@ -84,7 +84,7 @@ pub enum RM {
 	},
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Reg(pub u8);
 
 impl Reg {
@@ -93,7 +93,7 @@ impl Reg {
 	}
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Immediate(pub u64);
 
 impl Immediate {
@@ -308,6 +308,10 @@ simulator_macros::generate_instructions!(
 	Out8 E6 Imm8 :;
 	Out16 E7 Imm8 : so;
 	Out32 E7 Imm8 :;
+	PopReg16 58 SR : so;
+	PopReg64 58 SR :;
+	PushReg16 50 SR : so;
+	PushReg64 50 SR :;
 	Swi4 3F01 RM :;
 	Wrcr 3F00 Imm8 RM :;
 );
@@ -317,8 +321,7 @@ mod test {
 	use std::process::Command;
 
 	use crate::{
-		decode::decode,
-		instruction::Instruction,
+		instruction::{Instruction, decode},
 		memory::{MemoryManagementUnit, PhysicalMemoryManagementUnit, ReadOnlyMemory},
 	};
 
@@ -369,15 +372,15 @@ mod test {
 		test_nasm(
 			"mov r15, 0",
 			Instruction::MovReg64Imm {
-				register: 15,
-				imm: 0,
+				operand0: super::Reg(15),
+				operand1: super::Immediate(0),
 			},
 		);
 		test_nasm(
 			"mov rdx, 9993",
 			Instruction::MovReg64Imm {
-				register: 2,
-				imm: 9993,
+				operand0: super::Reg(2),
+				operand1: super::Immediate(9993),
 			},
 		);
 	}

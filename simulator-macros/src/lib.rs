@@ -273,7 +273,7 @@ pub fn generate_instructions(tokens: TokenStream) -> TokenStream {
 		.collect();
 
 	let instruction_definition =
-		quote::quote! { #[derive(Debug)] pub enum Instruction {#(#enum_variants)*}};
+		quote::quote! { #[derive(Debug, Eq, PartialEq)] pub enum Instruction {#(#enum_variants)*}};
 
 	let decode_function = quote::quote! {
 		pub fn decode(mmu: &mut MemoryManagementUnit, instruction_pointer: u64) -> Result<(Instruction, u64), Interrupt> {
