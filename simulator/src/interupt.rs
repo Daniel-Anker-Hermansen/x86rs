@@ -19,7 +19,7 @@ pub enum Interrupt {
 	DoubleFault,
 
 	// External interrupt or software interrupt.
-	IRQ(u8),
+	InterruptRequest(u8),
 }
 
 impl Display for Interrupt {
@@ -29,7 +29,7 @@ impl Display for Interrupt {
 			Interrupt::PageFault { error_code, cr2 } => write!(f, "PF({error_code:X}, {cr2:X})"),
 			Interrupt::Undefined => write!(f, "UD"),
 			Interrupt::DoubleFault => write!(f, "DF"),
-			Interrupt::IRQ(irq) => write!(f, "IRQ({irq})"),
+			Interrupt::InterruptRequest(irq) => write!(f, "IRQ({irq})"),
 		}
 	}
 }

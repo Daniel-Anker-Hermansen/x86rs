@@ -42,7 +42,6 @@ impl Memory for ConventionalMemory {
 	}
 
 	fn write_u8(&mut self, address: u64, value: u8) {
-		eprintln!("Write: [{address}] = {value}");
 		self.get_page(address)[(address & 0xFFF) as usize] = value;
 	}
 }

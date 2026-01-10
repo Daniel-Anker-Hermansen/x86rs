@@ -15,15 +15,15 @@ pub struct Registers {
 	/// The primary register file which is always available.
 	pub primary_registers: [u64; 16],
 
-	/// Used when handling a page fault interrupt. Requires CPL <= 0.
-	cr2: u64,
+	/// Config registers.
+	config_registers: [u64; 256],
 }
 
 impl Registers {
 	fn new() -> Registers {
 		Registers {
 			primary_registers: [0; 16],
-			cr2: 0,
+			config_registers: [0; 256],
 		}
 	}
 }
@@ -43,12 +43,6 @@ pub struct ProcessorState {
 
 	/// Current privilege level:
 	cpl: i8,
-
-	/// Where to place the stack for interrupts.
-	pub interupt_stack_pointer: u64,
-
-	/// Location of idt:
-	pub idt: u64,
 
 	/// The current instruction pointer (virtual address).
 	instruction_pointer: u64,
@@ -156,8 +150,6 @@ impl ProcessorState {
 			memory,
 			devices,
 			cpl: 0,
-			interupt_stack_pointer: 0,
-			idt: 0,
 			instruction_pointer: 0,
 			rflags: 0,
 		}
@@ -173,31 +165,26 @@ impl ProcessorState {
 			Interrupt::DoubleFault => (0x08, 0x00),
 			Interrupt::GeneralProtection => (0x0D, 0x00),
 			Interrupt::PageFault { error_code, cr2 } => {
-				self.registers.cr2 = cr2;
+				self.registers.config_registers[2] = cr2;
 				(0x0E, error_code)
 			}
-			Interrupt::IRQ(irq) => (irq as u64, 0x00),
+			Interrupt::InterruptRequest(irq) => (irq as u64, 0x00),
 		};
-		let interrupt_entry_ptr = self.idt + 16 * vector;
+		let interrupt_entry_ptr = self.registers.config_registers[0] + 16 * vector;
 		if try {
 			let data: [u8; 16] =
 				std::array::try_from_fn(|i| self.memory.read_u8(interrupt_entry_ptr + i as u64))?;
 			let entry: InteruptDescriptorEntry = unsafe { std::mem::transmute(data) };
 			if !entry.present || entry.rpl < self.cpl {
+				// This should only be checked
+				// on software interrupts.
 				Err(Interrupt::DoubleFault)?;
 			}
 			let stack_pointer = self.registers.primary_registers[4];
-			let new_stack_pointer = if self.cpl <= 0 {
-				stack_pointer
-			} else {
-				self.interupt_stack_pointer
-			};
+			let new_stack_pointer = self.registers.config_registers[1];
 			self.memory
 				.write_u64(new_stack_pointer - 8, stack_pointer)?;
-			self.memory.write_u64(
-				new_stack_pointer - 16,
-				((self.cpl as i64 as u64) << 32) | self.rflags,
-			)?;
+			self.memory.write_u64(new_stack_pointer - 16, self.rflags)?;
 			self.memory
 				.write_u64(new_stack_pointer - 24, self.instruction_pointer)?;
 			self.memory
@@ -261,7 +248,7 @@ impl ProcessorState {
 			let irq = IRQ.load(Ordering::Relaxed);
 			IRQ.store(0, Ordering::Relaxed);
 			if irq != 0 {
-				Err(Interrupt::IRQ(irq))?;
+				Err(Interrupt::InterruptRequest(irq))?;
 			}
 			let (instruction, size) = decode(&mut self.memory, self.instruction_pointer)?;
 			match instruction {
@@ -420,7 +407,7 @@ impl ProcessorState {
 				Instruction::PopReg64 { operand0 } => {
 					let rsp = self.read_reg_u64(SP);
 					let value = self.memory.read_u64(rsp)?;
-					self.write_reg_u64(SP, rsp.wrapping_add(2));
+					self.write_reg_u64(SP, rsp.wrapping_add(8));
 					self.write_reg_u64(operand0, value);
 				}
 				Instruction::PushReg16 { operand0 } => {
@@ -440,11 +427,8 @@ impl ProcessorState {
 					self.memory.swi4(value)
 				}
 				Instruction::Wrcr { operand0, operand1 } => {
-					eprintln!(
-						"Written 0x{:X} to config register 0x{:X}",
-						self.read_rm_u64(operand1)?,
-						operand0.0
-					);
+					let value = self.read_rm_u64(operand1)?;
+					self.registers.config_registers[operand0.0 as usize] = value;
 				}
 			};
 			self.instruction_pointer = self.instruction_pointer.wrapping_add(size);

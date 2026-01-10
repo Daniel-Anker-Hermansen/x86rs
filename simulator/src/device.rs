@@ -1,6 +1,10 @@
 use std::{
 	collections::HashMap,
 	io::{Read, Write},
+	sync::{
+		Arc,
+		atomic::{AtomicU8, Ordering},
+	},
 	thread,
 	time::Duration,
 };
@@ -33,12 +37,28 @@ impl Device for UTF8Console {
 pub struct Timer {
 	counter: u32,
 	irq: u8,
+	mode: Arc<AtomicU8>,
 }
 
 impl Timer {
 	pub fn new(irq: u8) -> Timer {
-		Timer { counter: 0, irq }
+		Timer {
+			counter: 0,
+			irq,
+			mode: Arc::new(AtomicU8::new(0)),
+		}
 	}
+}
+
+fn run_timer(counter: u32, irq: u8, mode: Arc<AtomicU8>) {
+	thread::spawn(move || {
+		thread::sleep(Duration::from_micros(counter as u64));
+		let timer_mode = mode.load(Ordering::Relaxed);
+		if timer_mode & 0x01 == 0x01 {
+			schedule_interrupt(irq);
+			run_timer(counter, irq, mode);
+		}
+	});
 }
 
 impl Device for Timer {
@@ -49,14 +69,8 @@ impl Device for Timer {
 			2 => self.counter ^= (self.counter & 0xFF0000) ^ ((byte as u32) << 16),
 			3 => self.counter ^= (self.counter & 0xFF000000) ^ ((byte as u32) << 24),
 			4 => {
-				if byte & 0x01 == 0x01 {
-					let counter = self.counter as u64;
-					let irq = self.irq;
-					thread::spawn(move || {
-						thread::sleep(Duration::from_micros(counter));
-						schedule_interrupt(irq);
-					});
-				}
+				self.mode.store(byte, Ordering::Relaxed);
+				run_timer(self.counter, self.irq, self.mode.clone());
 			}
 			_ => unreachable!(),
 		}
