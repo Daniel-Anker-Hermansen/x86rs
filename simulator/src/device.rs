@@ -1,23 +1,27 @@
 use std::{
 	collections::HashMap,
 	io::{Read, Write},
+	thread,
+	time::Duration,
 };
 
-pub trait Device {
-	fn out_u8(&mut self, byte: u8);
+use crate::state::schedule_interrupt;
 
-	fn in_u8(&mut self) -> u8;
+pub trait Device {
+	fn out_u8(&mut self, port: u16, byte: u8);
+
+	fn in_u8(&mut self, port: u16) -> u8;
 }
 
 pub struct UTF8Console;
 
 impl Device for UTF8Console {
-	fn out_u8(&mut self, byte: u8) {
+	fn out_u8(&mut self, _port: u16, byte: u8) {
 		let _ = std::io::stdout().write(&[byte]);
 		let _ = std::io::stdout().flush();
 	}
 
-	fn in_u8(&mut self) -> u8 {
+	fn in_u8(&mut self, _port: u16) -> u8 {
 		let mut buf = [0];
 		match std::io::stdin().read_exact(&mut buf) {
 			Ok(_) => buf[0],
@@ -26,32 +30,83 @@ impl Device for UTF8Console {
 	}
 }
 
+pub struct Timer {
+	counter: u32,
+	irq: u8,
+}
+
+impl Timer {
+	pub fn new(irq: u8) -> Timer {
+		Timer { counter: 0, irq }
+	}
+}
+
+impl Device for Timer {
+	fn out_u8(&mut self, port: u16, byte: u8) {
+		match port {
+			0 => self.counter ^= (self.counter & 0xFF) ^ byte as u32,
+			1 => self.counter ^= (self.counter & 0xFF00) ^ ((byte as u32) << 8),
+			2 => self.counter ^= (self.counter & 0xFF0000) ^ ((byte as u32) << 16),
+			3 => self.counter ^= (self.counter & 0xFF000000) ^ ((byte as u32) << 24),
+			4 => {
+				if byte & 0x01 == 0x01 {
+					let counter = self.counter as u64;
+					let irq = self.irq;
+					thread::spawn(move || {
+						thread::sleep(Duration::from_micros(counter));
+						schedule_interrupt(irq);
+					});
+				}
+			}
+			_ => unreachable!(),
+		}
+	}
+
+	fn in_u8(&mut self, _port: u16) -> u8 {
+		0xFF
+	}
+}
+
 pub struct PortDevices {
-	devices: HashMap<u16, Box<dyn Device>>,
+	devices: Vec<Box<dyn Device>>,
+	ports: HashMap<u16, (usize, u16)>,
 }
 impl PortDevices {
 	pub fn new() -> Self {
 		Self {
-			devices: HashMap::new(),
+			devices: Vec::new(),
+			ports: HashMap::new(),
 		}
 	}
 
-	pub fn add<T>(&mut self, port: u16, device: T)
+	pub fn add<T>(&mut self, ports: &[u16], device: T)
 	where
 		T: Device + 'static,
 	{
-		self.devices.insert(port, Box::new(device));
+		let index = self.devices.len();
+		self.devices.push(Box::new(device));
+		for (port, i) in ports.iter().zip(0..) {
+			self.ports.insert(*port, (index, i));
+		}
 	}
 
 	pub fn out_u8(&mut self, port: u16, byte: u8) {
-		if let Some(device) = self.devices.get_mut(&port) {
-			device.out_u8(byte);
+		if let Some(&(device, port)) = self.ports.get(&port) {
+			self.devices[device].out_u8(port, byte);
+		}
+	}
+
+	pub fn out_u32(&mut self, port: u16, value: u32) {
+		for (byte, port) in value.to_le_bytes().into_iter().zip(port..) {
+			if let Some(&(device, port)) = self.ports.get(&port) {
+				self.devices[device].out_u8(port, byte);
+			}
 		}
 	}
 
 	pub fn in_u8(&mut self, port: u16) -> u8 {
-		match self.devices.get_mut(&port) {
-			Some(device) => device.in_u8(),
+		match self.ports.get(&port) {
+			Some(&(device, port)) => self.devices[device].in_u8(port),
 			None => 0xFF,
 		}
 	}

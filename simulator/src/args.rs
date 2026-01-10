@@ -22,11 +22,14 @@ pub struct Memory {
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub enum DeviceType {
 	UTF8Console,
+	Timer {
+		irq: u8,
+	}
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug)]
 pub struct Device {
-	pub port: u16,
+	pub ports: Vec<u16>,
 	pub device_type: DeviceType,
 }
 

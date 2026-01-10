@@ -11,7 +11,7 @@ use memory::{
 };
 use state::ProcessorState;
 
-use crate::device::{PortDevices, UTF8Console};
+use crate::device::{PortDevices, Timer, UTF8Console};
 
 mod args;
 mod device;
@@ -45,7 +45,8 @@ fn main() {
 
 	for device in &toml.device {
 		match device.device_type {
-			args::DeviceType::UTF8Console => devices.add(device.port, UTF8Console),
+			args::DeviceType::UTF8Console => devices.add(&device.ports, UTF8Console),
+			args::DeviceType::Timer { irq } => devices.add(&device.ports, Timer::new(irq)),
 		}
 	}
 
