@@ -280,6 +280,7 @@ fn read_immediate(
 // so: Size override prefix
 // w: REX.w
 simulator_macros::generate_instructions!(
+	Hlt F4 :;
 	In8 E4 Imm8 :;
 	In16 E5 Imm8 : so;
 	In32 E5 Imm8 :;

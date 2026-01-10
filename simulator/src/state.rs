@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::{sync::{OnceLock, atomic::{AtomicU8, Ordering}}, thread};
 
 use crate::{
 	device::PortDevices,
@@ -29,6 +29,7 @@ impl Registers {
 }
 
 static IRQ: AtomicU8 = AtomicU8::new(0);
+static MAIN_THREAD: OnceLock<thread::Thread> = OnceLock::new();
 
 pub struct ProcessorState {
 	/// The register file. Note c3 is not a register but a field in the memory management unit.
@@ -145,6 +146,7 @@ macro_rules! read_write_rm {
 
 impl ProcessorState {
 	pub fn new(memory: MemoryManagementUnit, devices: PortDevices) -> ProcessorState {
+		let _ = MAIN_THREAD.set(thread::current());
 		ProcessorState {
 			registers: Registers::new(),
 			memory,
@@ -252,6 +254,7 @@ impl ProcessorState {
 			}
 			let (instruction, size) = decode(&mut self.memory, self.instruction_pointer)?;
 			match instruction {
+				Instruction::Hlt {} => thread::park(),
 				Instruction::In8 { operand0 } => {
 					if self.cpl > 0 {
 						Err(Interrupt::GeneralProtection)?;
@@ -451,4 +454,5 @@ impl ProcessorState {
 
 pub fn schedule_interrupt(irq: u8) {
 	IRQ.store(irq, Ordering::Relaxed);
+	MAIN_THREAD.get().expect("processor is running").unpark();
 }
